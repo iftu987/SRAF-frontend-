@@ -28,10 +28,20 @@ const firebaseConfig = {
   appId:             import.meta.env.FIREBASE_APP_ID,
 };
 
-// Guard against duplicate initialization during HMR (Vite hot-reload)
-const app = getApps().length === 0
-  ? initializeApp(firebaseConfig)
-  : getApps()[0];
+const missingEnvKeys = Object.entries(firebaseConfig)
+  .filter(([, value]) => typeof value !== 'string' || value.trim() === '')
+  .map(([key]) => key);
 
-export const auth = getAuth(app);
+if (missingEnvKeys.length > 0) {
+  console.warn('[Firebase] Missing environment values:', missingEnvKeys.join(', '));
+}
+
+export const firebaseReady = missingEnvKeys.length === 0;
+
+// Guard against duplicate initialization during HMR (Vite hot-reload).
+const app = firebaseReady
+  ? (getApps().find(({ name }) => name === '[DEFAULT]') || initializeApp(firebaseConfig))
+  : null;
+
+export const auth = app ? getAuth(app) : null;
 export default app;

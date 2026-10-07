@@ -5,15 +5,11 @@
  *
  * RecaptchaVerifier is intentionally NOT managed here.
  * It must be created in the component that owns the DOM element
- * (#recaptcha-container) using useEffect + useRef, and passed
- * into sendOtp() as a parameter.
- *
- * This avoids the "e is not a function" TypeError caused by React
- * re-renders detaching the DOM node that the verifier is bound to.
+ * and passed into sendOtp() as a parameter.
  */
 
 import { signInWithPhoneNumber } from 'firebase/auth';
-import { auth } from '../config/firebase.js';
+import { auth, firebaseReady } from '../config/firebase.js';
 
 /**
  * Send an OTP SMS via Firebase Phone Auth.
@@ -23,8 +19,19 @@ import { auth } from '../config/firebase.js';
  * @returns {Promise<ConfirmationResult>}
  */
 export const sendOtp = async (phoneNumber, verifier) => {
-  const confirmationResult = await signInWithPhoneNumber(auth, phoneNumber, verifier);
-  return confirmationResult;
+  if (!firebaseReady || !auth) {
+    const error = new Error('Firebase auth is not configured. Check the frontend .env file.');
+    error.code = 'auth/configuration-not-ready';
+    throw error;
+  }
+
+  if (!verifier) {
+    const error = new Error('A valid reCAPTCHA verifier is required before sending OTP.');
+    error.code = 'auth/recaptcha-not-ready';
+    throw error;
+  }
+
+  return signInWithPhoneNumber(auth, phoneNumber, verifier);
 };
 
 /**
@@ -46,7 +53,7 @@ export const confirmOtp = async (confirmationResult, otpCode) => {
  * @returns {Promise<string|null>}
  */
 export const getIdToken = async (forceRefresh = false) => {
-  const user = auth.currentUser;
+  const user = auth?.currentUser;
   if (!user) return null;
   return user.getIdToken(forceRefresh);
 };
@@ -55,5 +62,6 @@ export const getIdToken = async (forceRefresh = false) => {
  * Sign out the current Firebase user.
  */
 export const signOut = async () => {
+  if (!auth) return;
   return auth.signOut();
 };

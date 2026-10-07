@@ -3,21 +3,14 @@
  *
  * Family background form with Firebase Phone Authentication.
  *
- * reCAPTCHA container strategy
- * ────────────────────────────
- * The #recaptcha-container div is appended directly to document.body
- * (outside React's virtual DOM). This prevents the "Cannot read properties
- * of null (reading 'style')" error in recaptcha_en.js, which is caused by
- * React's reconciler replacing the container's DOM node while Google's
- * reCAPTCHA library still holds a reference to the old (now null) node.
- *
- * By keeping the container in document.body, React can never interfere
- * with the reCAPTCHA widget lifecycle.
+ * The reCAPTCHA container stays mounted with this component. Its verifier
+ * is created on demand so React StrictMode cannot race widget rendering
+ * against an effect cleanup during initial mount.
  */
 
 import React, { useState, useEffect, useRef } from 'react';
 import { RecaptchaVerifier } from 'firebase/auth';
-import { auth } from '../../config/firebase.js';
+import { auth, firebaseReady } from '../../config/firebase.js';
 import { useLanguage } from '../../context/LanguageContext';
 import { useAssessment } from '../../context/AssessmentContext';
 import OtpModal from './OtpModal';
@@ -32,69 +25,42 @@ export const DemographicsForm = () => {
   const [requestingOtp, setRequestingOtp] = useState(false);
   const [confirmationResult, setConfirmationResult] = useState(null);
   const recaptchaVerifierRef = useRef(null);
+  const recaptchaContainerRef = useRef(null);
 
-  // ── Mount a stable reCAPTCHA container on document.body ──────────────────
-  // This is intentionally OUTSIDE React's virtual DOM so reconciliation
-  // never removes or replaces the node while reCAPTCHA is using it.
   useEffect(() => {
-    // Create the body-level container once
-    let container = document.getElementById(RECAPTCHA_CONTAINER_ID);
-    if (!container) {
-      container = document.createElement('div');
-      container.id = RECAPTCHA_CONTAINER_ID;
-      container.style.position = 'fixed';
-      container.style.bottom = '0';
-      container.style.right = '0';
-      container.style.zIndex = '-1';
-      document.body.appendChild(container);
-    }
-
-    // Initialize the RecaptchaVerifier against the stable body container
-    recaptchaVerifierRef.current = new RecaptchaVerifier(
-      auth,
-      RECAPTCHA_CONTAINER_ID,
-      {
-        size: 'invisible',
-        callback: () => {
-          // reCAPTCHA challenge solved automatically
-        },
-        'expired-callback': () => {
-          // Token expired — reset on next attempt via resetVerifier()
-        },
-      }
-    );
-
-    // Pre-render the widget so it's ready immediately on button click
-    recaptchaVerifierRef.current.render().catch(() => {
-      // Silently ignore render failures (strict privacy browsers, etc.)
-    });
-
-    // ── Cleanup on unmount ──────────────────────────────────────────────────
     return () => {
       clearVerifier();
-      // Remove the body container when the form unmounts
-      const el = document.getElementById(RECAPTCHA_CONTAINER_ID);
-      if (el) el.remove();
     };
-  }, []); // run once on mount
+  }, []);
 
   const clearVerifier = () => {
-    if (recaptchaVerifierRef.current) {
-      try { recaptchaVerifierRef.current.clear(); } catch { /* ignore */ }
-      recaptchaVerifierRef.current = null;
+    const verifier = recaptchaVerifierRef.current;
+    recaptchaVerifierRef.current = null;
+    if (!verifier) return;
+
+    try {
+      verifier.clear();
+    } catch (error) {
+      console.error('[Firebase reCAPTCHA] Failed to clear verifier:', error);
     }
   };
 
-  const resetVerifier = () => {
-    clearVerifier();
-    const container = document.getElementById(RECAPTCHA_CONTAINER_ID);
-    if (!container) return;
-    recaptchaVerifierRef.current = new RecaptchaVerifier(
-      auth,
-      RECAPTCHA_CONTAINER_ID,
-      { size: 'invisible' }
-    );
-    recaptchaVerifierRef.current.render().catch(() => {});
+  const getRecaptchaVerifier = () => {
+    if (!recaptchaContainerRef.current) {
+      const error = new Error('The reCAPTCHA container is not mounted.');
+      error.code = 'auth/recaptcha-not-ready';
+      throw error;
+    }
+
+    if (!recaptchaVerifierRef.current) {
+      recaptchaVerifierRef.current = new RecaptchaVerifier(
+        auth,
+        recaptchaContainerRef.current,
+        { size: 'invisible' }
+      );
+    }
+
+    return recaptchaVerifierRef.current;
   };
 
   // ── Form field handler ────────────────────────────────────────────────────
@@ -135,19 +101,20 @@ export const DemographicsForm = () => {
       return;
     }
 
-    if (!recaptchaVerifierRef.current) {
+    if (!firebaseReady || !auth) {
       showToast(
         lang === 'bn'
-          ? 'reCAPTCHA প্রস্তুত হচ্ছে। একটু অপেক্ষা করুন।'
-          : 'reCAPTCHA is loading. Please wait a moment and try again.',
-        'warning'
+          ? 'Firebase সেটআপ সম্পূর্ণ হয়নি। .env ফাইল পরীক্ষা করুন।'
+          : 'Firebase is not configured. Please check the frontend .env file.',
+        'error'
       );
       return;
     }
 
     setRequestingOtp(true);
     try {
-      const result = await sendOtp(demographics.parentMobile, recaptchaVerifierRef.current);
+      const verifier = getRecaptchaVerifier();
+      const result = await sendOtp(demographics.parentMobile, verifier);
       setConfirmationResult(result);
       setShowOtp(true);
       showToast(
@@ -157,29 +124,42 @@ export const DemographicsForm = () => {
         'success'
       );
     } catch (err) {
-      console.error('[Firebase sendOtp] Error:', err.code, err.message);
-      resetVerifier(); // recreate for next attempt
+      console.error('[Firebase sendOtp] Error:', err);
+      clearVerifier();
 
+      const errorCode = err?.code;
       const msg =
-        err.code === 'auth/invalid-phone-number'
+        errorCode === 'auth/configuration-not-ready'
+          ? (lang === 'bn'
+              ? 'Firebase সেটআপ সম্পূর্ণ নয়। .env ফাইল এবং Firebase project configuration পরীক্ষা করুন।'
+              : 'Firebase is not fully configured. Please check the frontend .env file and Firebase project settings.')
+          : errorCode === 'auth/recaptcha-not-ready'
+          ? (lang === 'bn'
+              ? 'reCAPTCHA প্রস্তুত হচ্ছে। একটু অপেক্ষা করে আবার চেষ্টা করুন।'
+              : 'reCAPTCHA is still initializing. Please wait a moment and try again.')
+          : errorCode === 'auth/invalid-phone-number'
           ? (lang === 'bn'
               ? 'মোবাইল নম্বরটি সঠিক নয়। আন্তর্জাতিক ফরম্যাটে দিন।'
               : 'Invalid phone number. Use international format e.g. +8801712345678')
-          : err.code === 'auth/too-many-requests'
+          : errorCode === 'auth/captcha-check-failed' || errorCode === 'auth/invalid-app-credential'
+          ? (lang === 'bn'
+              ? 'reCAPTCHA যাচাই ব্যর্থ হয়েছে। ডোমেইন ও Firebase Phone Auth সেটিংস পরীক্ষা করে আবার চেষ্টা করুন।'
+              : 'reCAPTCHA verification failed. Check the authorized domain and Firebase Phone Auth settings, then try again.')
+          : errorCode === 'auth/too-many-requests'
           ? (lang === 'bn'
               ? 'অনেক বার চেষ্টা করা হয়েছে। কিছুক্ষণ পরে আবার চেষ্টা করুন।'
               : 'Too many requests. Please wait and try again.')
-          : err.code === 'auth/operation-not-allowed'
+          : errorCode === 'auth/operation-not-allowed'
           ? (lang === 'bn'
               ? 'এই অঞ্চলে SMS সক্রিয় করা হয়নি। Firebase Console থেকে SMS region সক্রিয় করুন।'
               : 'SMS is not enabled for this region. Enable it in Firebase Console → Auth → Settings → SMS region policy.')
-          : err.code === 'auth/billing-not-enabled'
+          : errorCode === 'auth/billing-not-enabled'
           ? (lang === 'bn'
               ? 'Firebase Blaze plan প্রয়োজন। Firebase Console থেকে billing সক্রিয় করুন।'
               : 'Firebase Blaze plan required. Enable billing in Firebase Console.')
           : (lang === 'bn'
               ? 'OTP পাঠাতে সমস্যা হয়েছে। পুনরায় চেষ্টা করুন।'
-              : `Could not send OTP (${err.code || 'unknown error'}). Please try again.`);
+              : `Could not send OTP (${errorCode || 'unknown error'}). Please try again.`);
 
       showToast(msg, 'error');
     } finally {
@@ -196,9 +176,6 @@ export const DemographicsForm = () => {
 
   return (
     <section className="page" id="page-1">
-      {/* NOTE: The reCAPTCHA container is appended to document.body in useEffect
-          so React cannot interfere with it. No div needed here. */}
-
       <div className="card">
         <h2>{lang === 'bn' ? 'ধাপ ১: পারিবারিক পটভূমির তথ্য' : 'Step 1: Family Background Information'}</h2>
         <p className="subtitle">
@@ -208,6 +185,7 @@ export const DemographicsForm = () => {
         </p>
 
         <form onSubmit={handleFormSubmit}>
+          <div id={RECAPTCHA_CONTAINER_ID} ref={recaptchaContainerRef} />
           <div className="form-grid">
             <div className="form-group">
               <label htmlFor="parent-name">Parent / Guardian Name</label>
