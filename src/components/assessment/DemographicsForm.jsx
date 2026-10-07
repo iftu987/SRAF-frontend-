@@ -3,21 +3,18 @@
  *
  * Family background form with Firebase Phone Authentication.
  *
- * Changes from old version:
- * ──────────────────────────
- * - Old: authService.sendOtp(mobile) → backend → Twilio Verify API
- * - New: sendOtp(mobile) → Firebase signInWithPhoneNumber (invisible reCAPTCHA)
- *        Firebase returns a ConfirmationResult which is stored in state and
- *        passed to OtpModal for the confirmation step.
- *
- * The invisible reCAPTCHA is rendered as a hidden div (#recaptcha-container).
- * Firebase handles it automatically — no user interaction needed in most cases.
- *
- * After successful OTP confirmation, onAuthSuccess stores the Firebase user
- * in AssessmentContext so the API service can attach the ID token to requests.
+ * RecaptchaVerifier lifecycle
+ * ───────────────────────────
+ * The RecaptchaVerifier is created in useEffect when the component mounts
+ * (so the #recaptcha-container DOM node already exists) and destroyed when
+ * the component unmounts. A ref holds the verifier so it survives re-renders
+ * without being recreated. This pattern eliminates the "e is not a function"
+ * TypeError that occurs when a module-level singleton loses its DOM binding.
  */
 
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
+import { RecaptchaVerifier } from 'firebase/auth';
+import { auth } from '../../config/firebase.js';
 import { useLanguage } from '../../context/LanguageContext';
 import { useAssessment } from '../../context/AssessmentContext';
 import OtpModal from './OtpModal';
@@ -30,6 +27,66 @@ export const DemographicsForm = () => {
   const [requestingOtp, setRequestingOtp] = useState(false);
   const [confirmationResult, setConfirmationResult] = useState(null);
 
+  // Holds the RecaptchaVerifier instance — persists across re-renders
+  const recaptchaVerifierRef = useRef(null);
+
+  // ── Create the RecaptchaVerifier once when the component mounts ──────────
+  useEffect(() => {
+    // Small delay ensures the #recaptcha-container div is in the DOM
+    const timer = setTimeout(() => {
+      if (!recaptchaVerifierRef.current) {
+        recaptchaVerifierRef.current = new RecaptchaVerifier(
+          auth,
+          'recaptcha-container',
+          {
+            size: 'invisible',
+            callback: () => {
+              // reCAPTCHA solved automatically — signInWithPhoneNumber proceeds
+            },
+            'expired-callback': () => {
+              // Token expired — clear so it gets recreated on next attempt
+              clearVerifier();
+            },
+          }
+        );
+
+        // Pre-render the widget immediately so it's ready when the user clicks
+        recaptchaVerifierRef.current.render().catch(() => {
+          // Render can fail in certain browser privacy modes — safe to ignore
+        });
+      }
+    }, 100);
+
+    // ── Destroy the verifier when the component unmounts ──────────────────
+    return () => {
+      clearTimeout(timer);
+      clearVerifier();
+    };
+  }, []); // run once on mount
+
+  const clearVerifier = () => {
+    if (recaptchaVerifierRef.current) {
+      try {
+        recaptchaVerifierRef.current.clear();
+      } catch {
+        // Ignore cleanup errors
+      }
+      recaptchaVerifierRef.current = null;
+    }
+  };
+
+  // Recreate verifier after a failed send attempt
+  const resetVerifier = () => {
+    clearVerifier();
+    recaptchaVerifierRef.current = new RecaptchaVerifier(
+      auth,
+      'recaptcha-container',
+      { size: 'invisible' }
+    );
+    recaptchaVerifierRef.current.render().catch(() => {});
+  };
+
+  // ── Form field handler ────────────────────────────────────────────────────
   const handleChange = (e) => {
     const { id, value } = e.target;
     let name = '';
@@ -40,10 +97,10 @@ export const DemographicsForm = () => {
     if (id === 'child-age')     name = 'childAge';
     if (id === 'school-grade')  name = 'schoolGrade';
     if (id === 'family-type')   name = 'familyType';
-
     setDemographics((prev) => ({ ...prev, [name]: value }));
   };
 
+  // ── Form submit — send OTP ────────────────────────────────────────────────
   const handleFormSubmit = async (e) => {
     e.preventDefault();
 
@@ -62,7 +119,17 @@ export const DemographicsForm = () => {
       showToast(
         lang === 'bn'
           ? 'মোবাইল নম্বরটি আন্তর্জাতিক ফরম্যাটে দিন, যেমন: +8801XXXXXXXXX'
-          : 'Please enter the phone number in international format, e.g. +8801712345678',
+          : 'Use international format: +8801712345678 or +919876543210',
+        'warning'
+      );
+      return;
+    }
+
+    if (!recaptchaVerifierRef.current) {
+      showToast(
+        lang === 'bn'
+          ? 'reCAPTCHA প্রস্তুত হচ্ছে। একটু অপেক্ষা করুন।'
+          : 'reCAPTCHA is initializing. Please wait a moment.',
         'warning'
       );
       return;
@@ -70,8 +137,7 @@ export const DemographicsForm = () => {
 
     setRequestingOtp(true);
     try {
-      // Firebase sends the SMS and returns a ConfirmationResult
-      const result = await sendOtp(demographics.parentMobile);
+      const result = await sendOtp(demographics.parentMobile, recaptchaVerifierRef.current);
       setConfirmationResult(result);
       setShowOtp(true);
       showToast(
@@ -82,15 +148,22 @@ export const DemographicsForm = () => {
       );
     } catch (err) {
       console.error('[Firebase sendOtp] Error:', err.code, err.message);
+      // Recreate the verifier so the user can try again
+      resetVerifier();
 
-      const msg = err.code === 'auth/invalid-phone-number'
-        ? (lang === 'bn'
-            ? 'মোবাইল নম্বরটি সঠিক নয়। আন্তর্জাতিক ফরম্যাটে দিন।'
-            : 'Invalid phone number. Use international format e.g. +8801712345678')
-        : err.code === 'auth/too-many-requests'
+      const msg =
+        err.code === 'auth/invalid-phone-number'
+          ? (lang === 'bn'
+              ? 'মোবাইল নম্বরটি সঠিক নয়। আন্তর্জাতিক ফরম্যাটে দিন।'
+              : 'Invalid phone number. Use international format e.g. +8801712345678')
+          : err.code === 'auth/too-many-requests'
           ? (lang === 'bn'
               ? 'অনেক বার চেষ্টা করা হয়েছে। কিছুক্ষণ পরে আবার চেষ্টা করুন।'
               : 'Too many requests. Please wait a moment and try again.')
+          : err.code === 'auth/operation-not-allowed'
+          ? (lang === 'bn'
+              ? 'এই অঞ্চলে SMS সক্রিয় করা হয়নি। অ্যাডমিনকে জানান।'
+              : 'SMS is not enabled for this region. Please contact the admin.')
           : (lang === 'bn'
               ? 'OTP পাঠাতে সমস্যা হয়েছে। পুনরায় চেষ্টা করুন।'
               : 'Could not send OTP. Please try again.');
@@ -102,7 +175,6 @@ export const DemographicsForm = () => {
   };
 
   const handleOtpSuccess = (firebaseUser) => {
-    // Store the Firebase user in context so the API interceptor can get the token
     if (setFirebaseUser) setFirebaseUser(firebaseUser);
     setShowOtp(false);
     setPage(2);
@@ -111,8 +183,8 @@ export const DemographicsForm = () => {
 
   return (
     <section className="page" id="page-1">
-      {/* Invisible reCAPTCHA container — required by Firebase Phone Auth */}
-      <div id="recaptcha-container" style={{ display: 'none' }} />
+      {/* Invisible reCAPTCHA mount point — must exist before verifier is created */}
+      <div id="recaptcha-container" />
 
       <div className="card">
         <h2>{lang === 'bn' ? 'ধাপ ১: পারিবারিক পটভূমির তথ্য' : 'Step 1: Family Background Information'}</h2>
@@ -126,32 +198,16 @@ export const DemographicsForm = () => {
           <div className="form-grid">
             <div className="form-group">
               <label htmlFor="parent-name">Parent / Guardian Name</label>
-              <input
-                type="text"
-                id="parent-name"
-                value={demographics.parentName || ''}
-                onChange={handleChange}
-                placeholder="e.g. Sarah Jenkins"
-                required
-              />
+              <input type="text" id="parent-name" value={demographics.parentName || ''} onChange={handleChange} placeholder="e.g. Sarah Jenkins" required />
             </div>
 
             <div className="form-group">
               <label htmlFor="parent-mobile">Parent / Guardian Mobile Number</label>
-              <input
-                type="tel"
-                id="parent-mobile"
-                value={demographics.parentMobile || ''}
-                onChange={handleChange}
-                placeholder="+8801712345678"
-                inputMode="tel"
-                autoComplete="tel"
-                required
-              />
+              <input type="tel" id="parent-mobile" value={demographics.parentMobile || ''} onChange={handleChange} placeholder="+8801712345678" inputMode="tel" autoComplete="tel" required />
               <small style={{ color: 'var(--text-muted)' }}>
                 {lang === 'bn'
                   ? 'আন্তর্জাতিক ফরম্যাটে দিন, যেমন: +8801712345678'
-                  : 'Use international format, e.g. +8801712345678 or +919876543210'}
+                  : 'Use international format e.g. +8801712345678 or +919876543210'}
               </small>
             </div>
 
@@ -168,38 +224,17 @@ export const DemographicsForm = () => {
 
             <div className="form-group">
               <label htmlFor="child-name">Child's Name (Optional)</label>
-              <input
-                type="text"
-                id="child-name"
-                value={demographics.childName || ''}
-                onChange={handleChange}
-                placeholder="e.g. Leo"
-              />
+              <input type="text" id="child-name" value={demographics.childName || ''} onChange={handleChange} placeholder="e.g. Leo" />
             </div>
 
             <div className="form-group">
               <label htmlFor="child-age">Child's Age (Years)</label>
-              <input
-                type="number"
-                id="child-age"
-                value={demographics.childAge || 12}
-                onChange={handleChange}
-                min="6"
-                max="18"
-                required
-              />
+              <input type="number" id="child-age" value={demographics.childAge || 12} onChange={handleChange} min="6" max="18" required />
             </div>
 
             <div className="form-group">
               <label htmlFor="school-grade">School Grade / Class</label>
-              <input
-                type="text"
-                id="school-grade"
-                value={demographics.schoolGrade || ''}
-                onChange={handleChange}
-                placeholder="e.g. Grade 7"
-                required
-              />
+              <input type="text" id="school-grade" value={demographics.schoolGrade || ''} onChange={handleChange} placeholder="e.g. Grade 7" required />
             </div>
 
             <div className="form-group">

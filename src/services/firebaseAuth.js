@@ -3,62 +3,26 @@
  *
  * Firebase Phone Authentication service.
  *
- * Provides two functions that mirror the old authService shape so that
- * components need minimal changes:
+ * RecaptchaVerifier is intentionally NOT managed here.
+ * It must be created in the component that owns the DOM element
+ * (#recaptcha-container) using useEffect + useRef, and passed
+ * into sendOtp() as a parameter.
  *
- *   sendOtp(phoneNumber)            → returns a Firebase ConfirmationResult
- *   confirmOtp(confirmationResult, otpCode) → returns a Firebase UserCredential
- *
- * Phone number must be in E.164 format: +countrycode followed by number
- * Example: +8801712345678 (Bangladesh), +919876543210 (India)
- *
- * reCAPTCHA
- * ─────────
- * Firebase Phone Auth requires a reCAPTCHA challenge to prevent SMS abuse.
- * We use an INVISIBLE RecaptchaVerifier which auto-solves in the background
- * without any user interaction in most cases.
- *
- * The verifier is attached to a DOM element with id="recaptcha-container"
- * which must exist in the page. DemographicsForm renders this invisible div.
+ * This avoids the "e is not a function" TypeError caused by React
+ * re-renders detaching the DOM node that the verifier is bound to.
  */
 
-import {
-  RecaptchaVerifier,
-  signInWithPhoneNumber,
-} from 'firebase/auth';
+import { signInWithPhoneNumber } from 'firebase/auth';
 import { auth } from '../config/firebase.js';
 
-let recaptchaVerifier = null;
-
 /**
- * Initialize (or re-use) an invisible RecaptchaVerifier.
- * Safe to call multiple times — reuses the existing instance.
- */
-const getRecaptchaVerifier = () => {
-  if (recaptchaVerifier) return recaptchaVerifier;
-
-  recaptchaVerifier = new RecaptchaVerifier(auth, 'recaptcha-container', {
-    size: 'invisible',
-    callback: () => {
-      // reCAPTCHA solved — signInWithPhoneNumber will proceed automatically
-    },
-    'expired-callback': () => {
-      // Token expired — reset so it gets recreated on next attempt
-      recaptchaVerifier = null;
-    },
-  });
-
-  return recaptchaVerifier;
-};
-
-/**
- * Send an OTP SMS to the given phone number using Firebase Phone Auth.
+ * Send an OTP SMS via Firebase Phone Auth.
  *
- * @param {string} phoneNumber – E.164 format, e.g. "+8801712345678"
- * @returns {Promise<ConfirmationResult>} – Pass to confirmOtp() after user enters code
+ * @param {string} phoneNumber      – E.164 format e.g. "+8801712345678"
+ * @param {RecaptchaVerifier} verifier – Created and managed by the calling component
+ * @returns {Promise<ConfirmationResult>}
  */
-export const sendOtp = async (phoneNumber) => {
-  const verifier = getRecaptchaVerifier();
+export const sendOtp = async (phoneNumber, verifier) => {
   const confirmationResult = await signInWithPhoneNumber(auth, phoneNumber, verifier);
   return confirmationResult;
 };
@@ -68,7 +32,7 @@ export const sendOtp = async (phoneNumber) => {
  *
  * @param {ConfirmationResult} confirmationResult – Returned by sendOtp()
  * @param {string} otpCode – 6-digit code entered by the user
- * @returns {Promise<UserCredential>} – Contains .user with uid, phoneNumber, getIdToken()
+ * @returns {Promise<UserCredential>}
  */
 export const confirmOtp = async (confirmationResult, otpCode) => {
   const credential = await confirmationResult.confirm(otpCode);
@@ -77,9 +41,8 @@ export const confirmOtp = async (confirmationResult, otpCode) => {
 
 /**
  * Get the Firebase ID Token for the currently signed-in user.
- * Pass forceRefresh=true to always get a fresh token (recommended before API calls).
  *
- * @param {boolean} forceRefresh
+ * @param {boolean} forceRefresh – Pass true to force-refresh before API calls
  * @returns {Promise<string|null>}
  */
 export const getIdToken = async (forceRefresh = false) => {
