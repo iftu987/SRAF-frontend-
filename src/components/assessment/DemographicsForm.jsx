@@ -16,8 +16,6 @@ import { useAssessment } from '../../context/AssessmentContext';
 import OtpModal from './OtpModal';
 import { sendOtp } from '../../services/firebaseAuth.js';
 
-const RECAPTCHA_CONTAINER_ID = 'firebase-recaptcha-root';
-
 export const DemographicsForm = () => {
   const { lang, showToast } = useLanguage();
   const { demographics, setDemographics, setPage, setFirebaseUser } = useAssessment();
@@ -25,7 +23,7 @@ export const DemographicsForm = () => {
   const [requestingOtp, setRequestingOtp] = useState(false);
   const [confirmationResult, setConfirmationResult] = useState(null);
   const recaptchaVerifierRef = useRef(null);
-  const recaptchaContainerRef = useRef(null);
+  const recaptchaButtonRef = useRef(null);
 
   useEffect(() => {
     return () => {
@@ -45,9 +43,9 @@ export const DemographicsForm = () => {
     }
   };
 
-  const getRecaptchaVerifier = () => {
-    if (!recaptchaContainerRef.current) {
-      const error = new Error('The reCAPTCHA container is not mounted.');
+  const getRecaptchaVerifier = async () => {
+    if (!recaptchaButtonRef.current) {
+      const error = new Error('The reCAPTCHA submit button is not mounted.');
       error.code = 'auth/recaptcha-not-ready';
       throw error;
     }
@@ -55,12 +53,22 @@ export const DemographicsForm = () => {
     if (!recaptchaVerifierRef.current) {
       recaptchaVerifierRef.current = new RecaptchaVerifier(
         auth,
-        recaptchaContainerRef.current,
+        recaptchaButtonRef.current,
         { size: 'invisible' }
       );
     }
 
+    await recaptchaVerifierRef.current.render();
     return recaptchaVerifierRef.current;
+  };
+
+  const resetVerifier = async (verifier) => {
+    const widgetId = await verifier.render();
+    const recaptcha = window.grecaptcha;
+    if (!recaptcha?.reset) {
+      throw new Error('Google reCAPTCHA is unavailable to reset the widget.');
+    }
+    recaptcha.reset(widgetId);
   };
 
   // ── Form field handler ────────────────────────────────────────────────────
@@ -112,8 +120,9 @@ export const DemographicsForm = () => {
     }
 
     setRequestingOtp(true);
+    let verifier;
     try {
-      const verifier = getRecaptchaVerifier();
+      verifier = await getRecaptchaVerifier();
       const result = await sendOtp(demographics.parentMobile, verifier);
       setConfirmationResult(result);
       setShowOtp(true);
@@ -125,7 +134,13 @@ export const DemographicsForm = () => {
       );
     } catch (err) {
       console.error('[Firebase sendOtp] Error:', err);
-      clearVerifier();
+      if (verifier) {
+        try {
+          await resetVerifier(verifier);
+        } catch (resetError) {
+          console.error('[Firebase reCAPTCHA] Failed to reset widget:', resetError);
+        }
+      }
 
       const errorCode = err?.code;
       const msg =
@@ -185,7 +200,6 @@ export const DemographicsForm = () => {
         </p>
 
         <form onSubmit={handleFormSubmit}>
-          <div id={RECAPTCHA_CONTAINER_ID} ref={recaptchaContainerRef} />
           <div className="form-grid">
             <div className="form-group">
               <label htmlFor="parent-name">Parent / Guardian Name</label>
@@ -240,7 +254,13 @@ export const DemographicsForm = () => {
           </div>
 
           <div style={{ marginTop: '1.5rem', display: 'flex', justifyContent: 'flex-end' }}>
-            <button type="submit" className="btn btn-primary" disabled={requestingOtp}>
+            <button
+              id="firebase-recaptcha-submit"
+              ref={recaptchaButtonRef}
+              type="submit"
+              className="btn btn-primary"
+              disabled={requestingOtp}
+            >
               {requestingOtp
                 ? (lang === 'bn' ? 'OTP পাঠানো হচ্ছে...' : 'Sending OTP...')
                 : (lang === 'bn' ? 'চালিয়ে যান ও মোবাইল যাচাই করুন →' : 'Continue & Verify Mobile →')}
