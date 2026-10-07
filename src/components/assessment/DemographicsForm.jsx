@@ -17,8 +17,8 @@ import OtpModal from './OtpModal';
 import { sendOtp } from '../../services/firebaseAuth.js';
 
 export const DemographicsForm = () => {
-  const { lang, showToast } = useLanguage();
-  const { demographics, setDemographics, setPage, setFirebaseUser } = useAssessment();
+  const { lang } = useLanguage();
+  const { demographics, setDemographics, setPage, setFirebaseUser, showToast } = useAssessment();
   const [showOtp, setShowOtp] = useState(false);
   const [requestingOtp, setRequestingOtp] = useState(false);
   const [confirmationResult, setConfirmationResult] = useState(null);
