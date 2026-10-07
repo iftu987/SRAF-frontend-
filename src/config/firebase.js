@@ -3,19 +3,17 @@
  *
  * Firebase Client SDK initialization.
  *
- * All VITE_FIREBASE_* variables are PUBLIC values from the Firebase Console
- * (Project Settings → General → Your apps → Web app → Config).
- * They are safe to include in frontend code — they identify your project
- * but do NOT grant any elevated access on their own.
+ * Variable names match the Vercel environment variable dashboard exactly
+ * (no VITE_ prefix). Vite exposes them via import.meta.env because
+ * 'FIREBASE_' is listed in envPrefix inside vite.config.js.
  *
- * Add these to your frontend/.env file:
- *
- *   VITE_FIREBASE_API_KEY=AIzaSy...
- *   VITE_FIREBASE_AUTH_DOMAIN=your-project.firebaseapp.com
- *   VITE_FIREBASE_PROJECT_ID=your-firebase-project-id
- *   VITE_FIREBASE_APP_ID=1:123456789:web:abc123
- *
- * (VITE_ prefix is required by Vite to expose env vars to the browser)
+ * Set these in Vercel → Project Settings → Environment Variables:
+ *   FIREBASE_API_KEY
+ *   FIREBASE_AUTH_DOMAIN
+ *   FIREBASE_PROJECT_ID
+ *   FIREBASE_STORAGE_BUCKET
+ *   FIREBASE_MESSAGING_SENDER_ID
+ *   FIREBASE_APP_ID
  */
 
 import { initializeApp, getApps } from 'firebase/app';
