@@ -30,12 +30,39 @@ export const DemographicsForm = () => {
   // Holds the RecaptchaVerifier instance — persists across re-renders
   const recaptchaVerifierRef = useRef(null);
 
-  // ── Destroy verifier on unmount only ────────────────────────────────────
-  // The verifier is created LAZILY (only when the user clicks the button)
-  // so the reCAPTCHA iframe never loads on a simple page refresh.
+  // ── Create the RecaptchaVerifier once when the component mounts ──────────
   useEffect(() => {
-    return () => clearVerifier();
-  }, []);
+    // Small delay ensures the #recaptcha-container div is in the DOM
+    const timer = setTimeout(() => {
+      if (!recaptchaVerifierRef.current) {
+        recaptchaVerifierRef.current = new RecaptchaVerifier(
+          auth,
+          'recaptcha-container',
+          {
+            size: 'invisible',
+            callback: () => {
+              // reCAPTCHA solved automatically — signInWithPhoneNumber proceeds
+            },
+            'expired-callback': () => {
+              // Token expired — clear so it gets recreated on next attempt
+              clearVerifier();
+            },
+          }
+        );
+
+        // Pre-render the widget immediately so it's ready when the user clicks
+        recaptchaVerifierRef.current.render().catch(() => {
+          // Render can fail in certain browser privacy modes — safe to ignore
+        });
+      }
+    }, 100);
+
+    // ── Destroy the verifier when the component unmounts ──────────────────
+    return () => {
+      clearTimeout(timer);
+      clearVerifier();
+    };
+  }, []); // run once on mount
 
   const clearVerifier = () => {
     if (recaptchaVerifierRef.current) {
@@ -48,21 +75,15 @@ export const DemographicsForm = () => {
     }
   };
 
-  // Create or recreate the verifier (lazy — called only when user submits)
-  const getOrCreateVerifier = () => {
-    if (!recaptchaVerifierRef.current) {
-      recaptchaVerifierRef.current = new RecaptchaVerifier(
-        auth,
-        'recaptcha-container',
-        {
-          size: 'invisible',
-          'expired-callback': () => {
-            clearVerifier();
-          },
-        }
-      );
-    }
-    return recaptchaVerifierRef.current;
+  // Recreate verifier after a failed send attempt
+  const resetVerifier = () => {
+    clearVerifier();
+    recaptchaVerifierRef.current = new RecaptchaVerifier(
+      auth,
+      'recaptcha-container',
+      { size: 'invisible' }
+    );
+    recaptchaVerifierRef.current.render().catch(() => {});
   };
 
   // ── Form field handler ────────────────────────────────────────────────────
@@ -104,12 +125,19 @@ export const DemographicsForm = () => {
       return;
     }
 
-
+    if (!recaptchaVerifierRef.current) {
+      showToast(
+        lang === 'bn'
+          ? 'reCAPTCHA প্রস্তুত হচ্ছে। একটু অপেক্ষা করুন।'
+          : 'reCAPTCHA is initializing. Please wait a moment.',
+        'warning'
+      );
+      return;
+    }
 
     setRequestingOtp(true);
     try {
-      const verifier = getOrCreateVerifier();
-      const result = await sendOtp(demographics.parentMobile, verifier);
+      const result = await sendOtp(demographics.parentMobile, recaptchaVerifierRef.current);
       setConfirmationResult(result);
       setShowOtp(true);
       showToast(
@@ -120,8 +148,8 @@ export const DemographicsForm = () => {
       );
     } catch (err) {
       console.error('[Firebase sendOtp] Error:', err.code, err.message);
-      // Clear the verifier so a fresh one is created on next attempt
-      clearVerifier();
+      // Recreate the verifier so the user can try again
+      resetVerifier();
 
       const msg =
         err.code === 'auth/invalid-phone-number'
